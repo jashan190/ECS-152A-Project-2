@@ -214,17 +214,109 @@ def display_dns_output(server_ip, rtt_ms, parsed):
         print(" ", rr)
 
 
-if __name__ == "__main__":
-    domain = "wikipedia.org"
-    server_ip = random.choice(ROOT_SERVERS)
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        _, payload = build_dns_request(domain, TYPE_A)
-        start = send_dns_request(sock, server_ip, payload)
-        rtt_ms, resp = receive_dns_response(sock, start)
+def resolve_iteratively(domain, qtype=TYPE_A, timeout_s=10.0, max_hops=20):
+    current_name = domain.strip(".")
+    nameservers = ROOT_SERVERS[:]
+    hops = []
+
+    for _ in range(max_hops):
+        if not nameservers:
+            raise RuntimeError("no nameservers available for next hop")
+
+        server_ip = random.choice(nameservers)
+        family = socket.AF_INET6 if ":" in server_ip else socket.AF_INET
+        sock = socket.socket(family, socket.SOCK_DGRAM)
+        try:
+            _, payload = build_dns_request(current_name, qtype)
+            start = send_dns_request(sock, server_ip, payload, timeout_s=timeout_s)
+            rtt_ms, resp = receive_dns_response(sock, start)
+        finally:
+            sock.close()
+
         parsed = extract_dns_records(resp)
-        display_dns_output(server_ip, rtt_ms, parsed)
-    except socket.timeout:
-        print("Timed out")
+        hops.append({
+            "qname": current_name,
+            "server": server_ip,
+            "rtt_ms": rtt_ms,
+            "parsed": parsed,
+        })
+
+        if parsed["rcode"] != 0:
+            raise RuntimeError(f"dns error rcode={parsed['rcode']} from {server_ip}")
+
+        answers = parsed["answers"]
+        direct_answers = [rr["rdata"] for rr in answers if rr["type"] == qtype]
+        if direct_answers:
+            return direct_answers[0], hops
+
+        cname_answers = [rr["rdata"] for rr in answers if rr["type"] == TYPE_CNAME]
+        if cname_answers:
+            current_name = cname_answers[0].strip(".")
+            nameservers = ROOT_SERVERS[:]
+            continue
+
+        glue_ipv4 = [rr["rdata"] for rr in parsed["additional"] if rr["type"] == TYPE_A]
+        glue_ipv6 = [rr["rdata"] for rr in parsed["additional"] if rr["type"] == TYPE_AAAA]
+        nameservers = glue_ipv4 if glue_ipv4 else glue_ipv6
+
+    raise RuntimeError("max hops reached before final answer")
+
+
+def display_resolution_trace(hops, final_ip):
+    for idx, hop in enumerate(hops, 1):
+        parsed = hop["parsed"]
+        print(f"Hop {idx}: qname={hop['qname']} server={hop['server']} rtt={hop['rtt_ms']:.2f} ms")
+        answers = [rr["rdata"] for rr in parsed["answers"] if rr["type"] == TYPE_A]
+        authority_ns = [rr["rdata"] for rr in parsed["authority"] if rr["type"] == TYPE_NS]
+        next_ips = [rr["rdata"] for rr in parsed["additional"] if rr["type"] in (TYPE_A, TYPE_AAAA)]
+        if answers:
+            print("  final answer:", ", ".join(answers))
+        elif authority_ns:
+            print("  referral ns:", ", ".join(authority_ns[:4]))
+            if next_ips:
+                print("  next server ip(s):", ", ".join(next_ips[:4]))
+    print(f"Resolved IP: {final_ip}")
+
+
+def http_request_by_ip(ip, host, path="/", timeout_s=10.0):
+    family = socket.AF_INET6 if ":" in ip else socket.AF_INET
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    sock.settimeout(timeout_s)
+    request = (
+        f"GET {path} HTTP/1.1\r\n"
+        f"Host: {host}\r\n"
+        "Connection: close\r\n"
+        "User-Agent: ECS152A-DNSClient/1.0\r\n\r\n"
+    ).encode("ascii")
+    try:
+        start = time.perf_counter()
+        sock.connect((ip, 80))
+        sock.sendall(request)
+        chunks = []
+        while True:
+            data = sock.recv(4096)
+            if not data:
+                break
+            chunks.append(data)
+        rtt_ms = (time.perf_counter() - start) * 1000.0
     finally:
         sock.close()
+    response = b"".join(chunks)
+    return rtt_ms, response
+
+
+def display_http_output(http_rtt_ms, response_bytes):
+    first_line = response_bytes.split(b"\r\n", 1)[0].decode("iso-8859-1", errors="replace")
+    print(f"HTTP RTT: {http_rtt_ms:.2f} ms")
+    print(f"HTTP Status: {first_line}")
+
+
+if __name__ == "__main__":
+    domain = "wikipedia.org"
+    try:
+        final_ip, hops = resolve_iteratively(domain, TYPE_A)
+        display_resolution_trace(hops, final_ip)
+        http_rtt_ms, http_response = http_request_by_ip(final_ip, domain)
+        display_http_output(http_rtt_ms, http_response)
+    except socket.timeout:
+        print("Timed out")
