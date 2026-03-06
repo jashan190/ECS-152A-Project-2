@@ -199,3 +199,16 @@ def extract_dns_records(response_bytes):
         "authority": authority,
         "additional": additional,
     }
+
+
+def display_dns_output(server_ip, rtt_ms, parsed):
+    print(f"Server: {server_ip} RTT={rtt_ms:.2f} ms rcode={parsed['rcode']} aa={parsed['aa']}")
+    print("Answers:")
+    for rr in parsed["answers"]:
+        print(" ", rr)
+    print("Authority:")
+    for rr in parsed["authority"]:
+        print(" ", rr)
+    print("Additional:")
+    for rr in parsed["additional"]:
+        print(" ", rr)
