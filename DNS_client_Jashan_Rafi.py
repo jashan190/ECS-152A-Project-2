@@ -212,3 +212,19 @@ def display_dns_output(server_ip, rtt_ms, parsed):
     print("Additional:")
     for rr in parsed["additional"]:
         print(" ", rr)
+
+
+if __name__ == "__main__":
+    domain = "wikipedia.org"
+    server_ip = random.choice(ROOT_SERVERS)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        _, payload = build_dns_request(domain, TYPE_A)
+        start = send_dns_request(sock, server_ip, payload)
+        rtt_ms, resp = receive_dns_response(sock, start)
+        parsed = extract_dns_records(resp)
+        display_dns_output(server_ip, rtt_ms, parsed)
+    except socket.timeout:
+        print("Timed out")
+    finally:
+        sock.close()
